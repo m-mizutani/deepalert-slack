@@ -12,13 +12,20 @@ import (
 	"github.com/aws/aws-sdk-go/service/secretsmanager"
 	"github.com/m-mizutani/deepalert"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
-	"github.com/nlopes/slack"
+	// "github.com/nlopes/slack"
+	"github.com/m-mizutani/slack"
 )
 
+var logger = logrus.New()
+
 type arguments struct {
-	Report    deepalert.Report
-	SecretArn string
+	Report         deepalert.Report
+	SecretArn      string
+	IgnoreSeverity string
+	MessagePrefix  string
+	SlackURL       string
 }
 
 func getSecretValues(secretArn string, values interface{}) error {
@@ -50,7 +57,7 @@ func getSecretValues(secretArn string, values interface{}) error {
 	return nil
 }
 
-func reportToMessage(report deepalert.Report) (*slack.WebhookMessage, error) {
+func reportToMessage(report deepalert.Report, messagePrefix string) (*slack.WebhookMessage, error) {
 	var color string
 	switch report.Result.Severity {
 	case deepalert.SevSafe:
@@ -63,36 +70,44 @@ func reportToMessage(report deepalert.Report) (*slack.WebhookMessage, error) {
 		color = "#888888"
 	}
 
-	fields := []slack.AttachmentField{
-		{
-			Title: "Severity",
-			Value: fmt.Sprintf("%s: %s", report.Result.Severity, report.Result.Reason),
-		},
-	}
-	for _, attr := range report.Alert.Attributes {
-		field := slack.AttachmentField{
-			Title: attr.Key,
-			Value: attr.Value,
+	/*
+		fields := []slack.AttachmentField{
+			{
+				Title: "Severity",
+				Value: fmt.Sprintf("%s: %s", report.Result.Severity, report.Result.Reason),
+			},
 		}
+	*/
+	var attachments []slack.Attachment
 
-		if attr.Type != "" {
-			field.Title = fmt.Sprintf("%s (%s)", attr.Key, attr.Type)
+	for _, alert := range report.Alerts {
+		/*
+			for _, attr := range alert.Attributes {
+				field := slack.AttachmentField{
+					Title: attr.Key,
+					Value: attr.Value,
+				}
+
+				if attr.Type != "" {
+					field.Title = fmt.Sprintf("%s (%s)", attr.Key, attr.Type)
+				}
+				fields = append(fields, field)
+			}
+		*/
+
+		attachment := slack.Attachment{
+			Title:      fmt.Sprintf("Rule: %s", alert.RuleName),
+			AuthorName: alert.Detector,
+			Text:       alert.Description,
+			Color:      color,
+			// Fields:     fields,
 		}
-		fields = append(fields, field)
-	}
-
-	lineDelim := "- - - - - - - - - -"
-	attachment := slack.Attachment{
-		Title:      fmt.Sprintf("Rule: %s", report.Alert.RuleName),
-		AuthorName: report.Alert.Detector,
-		Text:       report.Alert.Description + "\n" + lineDelim,
-		Color:      color,
-		Fields:     fields,
+		attachments = append(attachments, attachment)
 	}
 
 	msg := slack.WebhookMessage{
-		Text:        "DeepAlert Report of Security Alert",
-		Attachments: []slack.Attachment{attachment},
+		Text:        messagePrefix + " DeepAlert Report of Security Alert",
+		Attachments: attachments,
 	}
 
 	return &msg, nil
@@ -102,32 +117,69 @@ type slackSecrets struct {
 	SlackURL string `json:"slack_url"`
 }
 
-func handler(args arguments) error {
-	var secrets slackSecrets
-	if err := getSecretValues(args.SecretArn, &secrets); err != nil {
-		return errors.Wrapf(err, "Fail to get values from SecretsManager: %s", args.SecretArn)
+func handler(args arguments) (bool, error) {
+	var slackURL string
+
+	if args.SlackURL == "" {
+		logger.WithField("secretsArn", args.SecretArn).Info("SLACK_URL is not set, use SecretsManager instead")
+		var secrets slackSecrets
+		if err := getSecretValues(args.SecretArn, &secrets); err != nil {
+			return false, errors.Wrapf(err, "Fail to get values from SecretsManager: %s", args.SecretArn)
+		}
+		slackURL = secrets.SlackURL
+	} else {
+		logger.Info("Use SLACK_URL")
+		slackURL = args.SlackURL
 	}
 
-	msg, err := reportToMessage(args.Report)
+	// If true, a report of the severity will be dropped.
+	filter := map[string]bool{}
+	for _, sev := range strings.Split(args.IgnoreSeverity, ",") {
+		filter[sev] = true
+	}
+
+	if drop, ok := filter[string(args.Report.Result.Severity)]; ok && drop {
+		return false, nil
+	}
+
+	msg, err := reportToMessage(args.Report, args.MessagePrefix)
 	if err != nil {
-		return errors.Wrapf(err, "Fail to build slack message")
+		return false, errors.Wrapf(err, "Fail to build slack message")
 	}
 
-	if err := slack.PostWebhook(secrets.SlackURL, msg); err != nil {
-		return errors.Wrapf(err, "Fail to send slack message: %v", msg)
+	if err := slack.PostWebhook(slackURL, msg); err != nil {
+		return false, errors.Wrapf(err, "Fail to send slack message: %v", msg)
 	}
 
-	return nil
+	return true, nil
 }
 
 func lambdaHandler(ctx context.Context, report deepalert.Report) error {
+	logger.WithField("report", report).Info("Start handler")
+
 	args := arguments{
-		Report:    report,
-		SecretArn: os.Getenv("SecretArn"),
+		Report:         report,
+		IgnoreSeverity: os.Getenv("IGNORE_SEVERITY"),
+		MessagePrefix:  os.Getenv("MESSAGE_PREFIX"),
+		SlackURL:       os.Getenv("SLACK_URL"),
+		SecretArn:      os.Getenv("SECRET_ARN"),
 	}
-	return handler(args)
+
+	result, err := handler(args)
+	logger.WithFields(logrus.Fields{
+		"result": result,
+		"args":   args,
+	}).Info("Done handler")
+
+	if err != nil {
+		logger.WithError(err).Error("Fail to post slack message")
+	}
+
+	return err
 }
 
 func main() {
+	logger.SetFormatter(&logrus.JSONFormatter{})
+	logger.SetLevel(logrus.InfoLevel)
 	deepalert.StartEmitter(lambdaHandler)
 }
