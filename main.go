@@ -70,16 +70,7 @@ func reportToMessage(report deepalert.Report, messagePrefix string) (*slack.Webh
 		color = "#888888"
 	}
 
-	/*
-		fields := []slack.AttachmentField{
-			{
-				Title: "Severity",
-				Value: fmt.Sprintf("%s: %s", report.Result.Severity, report.Result.Reason),
-			},
-		}
-	*/
 	var attachments []slack.Attachment
-
 	for _, alert := range report.Alerts {
 		/*
 			for _, attr := range alert.Attributes {
@@ -106,7 +97,6 @@ func reportToMessage(report deepalert.Report, messagePrefix string) (*slack.Webh
 	}
 
 	msg := slack.WebhookMessage{
-		Text:        messagePrefix + " DeepAlert Report of Security Alert",
 		Attachments: attachments,
 	}
 
@@ -130,6 +120,11 @@ func handler(args arguments) (bool, error) {
 	} else {
 		logger.Info("Use SLACK_URL")
 		slackURL = args.SlackURL
+	}
+
+	// Skip if the report is not published
+	if !args.Report.IsPublished() {
+		return false, nil
 	}
 
 	// If true, a report of the severity will be dropped.
