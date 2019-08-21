@@ -71,30 +71,39 @@ func reportToMessage(report deepalert.Report, messagePrefix string) (*slack.Webh
 	}
 
 	var attachments []slack.Attachment
-	for _, alert := range report.Alerts {
-		/*
-			for _, attr := range alert.Attributes {
-				field := slack.AttachmentField{
-					Title: attr.Key,
-					Value: attr.Value,
-				}
+	alert := report.Alerts[0]
 
-				if attr.Type != "" {
-					field.Title = fmt.Sprintf("%s (%s)", attr.Key, attr.Type)
-				}
-				fields = append(fields, field)
+	/*
+		for _, attr := range alert.Attributes {
+			field := slack.AttachmentField{
+				Title: attr.Key,
+				Value: attr.Value,
 			}
-		*/
 
-		attachment := slack.Attachment{
-			Title:      fmt.Sprintf("Rule: %s", alert.RuleName),
-			AuthorName: alert.Detector,
-			Text:       alert.Description,
-			Color:      color,
-			// Fields:     fields,
+			if attr.Type != "" {
+				field.Title = fmt.Sprintf("%s (%s)", attr.Key, attr.Type)
+			}
+			fields = append(fields, field)
 		}
-		attachments = append(attachments, attachment)
+	*/
+
+	attachment := slack.Attachment{
+		Title:      fmt.Sprintf("Rule: %s", alert.RuleName),
+		AuthorName: alert.Detector,
+		Text:       alert.Description,
+		Color:      color,
+		Fields: []slack.AttachmentField{
+			{
+				Title: "Report ID",
+				Value: string(report.ID),
+			},
+			{
+				Title: "Severity",
+				Value: string(report.Result.Severity),
+			},
+		},
 	}
+	attachments = append(attachments, attachment)
 
 	msg := slack.WebhookMessage{
 		Attachments: attachments,
@@ -124,6 +133,13 @@ func handler(args arguments) (bool, error) {
 
 	// Skip if the report is not published
 	if !args.Report.IsPublished() {
+		logger.WithField("status", args.Report.Status).Info("Report is not published")
+		return false, nil
+	}
+
+	// Skip if the report does not have alert (why?)
+	if len(args.Report.Alerts) == 0 {
+		logger.Warn("Report does not have alert")
 		return false, nil
 	}
 
